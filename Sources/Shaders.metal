@@ -144,12 +144,15 @@ float3 sJulia(float2 p, ARGS) {
     }
     float3 col;
     if (i == MAXI) {
-        col = PAL(trap * 2 + t) * (0.2 + u.bass);
+        // Near-black interior that breathes with the bass.
+        col = PAL(length(z) * 2 + t) * 0.06 * (1 + u.bass * 2);
     } else {
+        // Escape-time bands that flow inward with the music.
         float n = float(i) - log2(log2(dot(z, z))) + 4;
-        col = PAL(n * 0.035 + t * 0.5) * (0.4 + 0.6 * sqrt(max(n, 0.0) / MAXI)) * (0.6 + u.level * 1.4);
+        float bands = 0.5 + 0.5 * cos(n * 0.6 - u.time * 2);
+        col = PAL(n * 0.02 + t * 0.5) * bands * saturate(n / 25) * (0.5 + u.level * 0.8);
     }
-    col += PAL(0.9) * exp(-trap * 30) * u.treble * 2;
+    if (i < MAXI) col += PAL(0.9) * exp(-trap * 40) * u.treble; // inside, every orbit sits near the trap: it would flood
     return col;
 }
 
@@ -160,7 +163,7 @@ float3 sScope(float2 p, float2 uv, ARGS) {
         float y = WAVE(uv.x) * (0.55 - fk * 0.08) * (k % 2 == 0 ? 1 : -1);
         y += sin(uv.x * TAU * 2 + u.time + fk) * 0.03 * fk * u.mid;
         float d = abs(p.y - y);
-        col += PAL(fk * 0.12 + uv.x * 0.4 + u.time * 0.03) * (0.004 + 0.002 * u.level) / (d + 0.004) * (1 - fk * 0.17);
+        col += PAL(fk * 0.12 + uv.x * 0.4 + u.time * 0.03) * (0.008 + 0.004 * u.level) / (d + 0.004) * (1 - fk * 0.17);
     }
     float2 g = abs(fract(p * 4) - 0.5);
     col += PAL(0.6) * 0.05 * smoothstep(0.48, 0.5, max(g.x, g.y));
@@ -181,8 +184,8 @@ float3 sStars(float2 p, ARGS) {
         float h = hash21(id);
         float2 off = float2(h, fract(h * 34.1)) - 0.5;
         float d = length(gv - off * 0.7);
-        float star = (0.015 + u.treble * 0.02) / d * smoothstep(0.5, 0.2, d);
-        col += PAL(h + u.time * 0.02) * star * fade * (0.6 + u.bass * 1.5);
+        float star = (0.008 + u.treble * 0.012) / d * smoothstep(0.35, 0.05, d);
+        col += PAL(h + u.time * 0.02) * star * fade * fade * (0.6 + u.bass * 1.5);
     }
     float r = length(p), a = atan2(p.y, p.x);
     float streak = pow(noise(float2(a * 30, r * 2 - u.time * 4)), 6.0) * smoothstep(0.1, 1.2, r);
@@ -223,7 +226,8 @@ float3 sBars(float2 p, float2 uv, ARGS) {
 
 float orbMap(float3 q, ARGS) {
     float3 n = normalize(q);
-    float s = SPEC(abs(n.y));
+    // Band energies, not raw bins: a jagged spectrum makes a surface too spiky to raymarch cleanly.
+    float s = mix(u.bass, u.treble, abs(n.y)) * 0.8 + u.mid * 0.2;
     float d = sin(n.x * 7 + u.time) * sin(n.y * 7 + u.time * 1.3) * sin(n.z * 7 - u.time * 0.7);
     return length(q) - (0.75 + u.bass * 0.25 + s * 0.35 + d * (0.06 + u.mid * 0.25));
 }
@@ -237,10 +241,10 @@ float3 sOrb(float2 p, ARGS) {
     ro.yz = R2 * ro.yz; rd.yz = R2 * rd.yz;
     float dist = 0;
     bool hit = false;
-    for (int i = 0; i < 80; i++) {
+    for (int i = 0; i < 100; i++) {
         float d = orbMap(ro + rd * dist, PASS);
         if (d < 0.001) { hit = true; break; }
-        dist += d * 0.6;
+        dist += d * 0.5;
         if (dist > 8) break;
     }
     float r = length(p);
