@@ -44,6 +44,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var mixT: Float = 1
     private var palette = palettes[0].abcd
     private var cycleClock: Float = 0
+    private var tempo: Float = 1
     private var frames = 0, fpsClock = CACurrentMediaTime()
 
     init(view: MTKView, model: Model) {
@@ -95,7 +96,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     }
 
     func draw(in view: MTKView) {
-        let s = model.s
+        var s = model.s
         let now = CACurrentMediaTime()
         let dt = Float(min(now - last, 0.1))
         last = now
@@ -103,23 +104,31 @@ final class Renderer: NSObject, MTKViewDelegate {
         let a = analyzer
         a.update(audio.latest(a.n), sampleRate: audio.sampleRate, dt: dt, gain: s.gain, smoothing: s.smoothing, beatSensitivity: s.beatSensitivity)
         rtime += dt
-        time += dt * s.speed * (0.5 + a.level * 1.5) // the music drives the clock
+        let smart = s.autoCycle && s.smartPilot
+        tempo += ((smart && a.bpm > 0 ? min(max(a.bpm / 120, 0.6), 1.5) : 1) - tempo) * min(1, dt * 0.5)
+        time += dt * s.speed * tempo * (0.5 + a.level * 1.5) // the music (and its tempo) drives the clock
+
+        let vibe = Vibe.profile(genre: model.track?.genre) ?? Vibe.profile(bpm: a.bpm, energy: a.energy, brightness: a.brightness)
+        var label: String?
+        if s.autoCycle {
+            cycleClock += dt
+            let due = cycleClock > Float(s.cycleSeconds) && (!s.cycleOnBeat || a.didBeat || cycleClock > Float(s.cycleSeconds) + 5)
+            let newTrack = model.takeNewTrack()
+            // Smart: also re-theme on a new song, and on a drop (but not twice in 8 s).
+            if due || (smart && (newTrack || (a.didDrop && cycleClock > 8))) {
+                cycleClock = 0
+                if smart { model.applyVibe(vibe) } else if s.randomizeOnCycle { model.randomize() } else { model.step(1) }
+                if newTrack, let t = model.track { label = "♪ \(t.title) — \(t.artist)" }
+            }
+        } else { cycleClock = 0 }
+        s = model.s
 
         if s.mode != currentMode {
             if currentMode >= 0 { prevMode = currentMode; mixT = 0 }
             currentMode = s.mode
-            model.say(Model.modes[s.mode])
+            model.say(label ?? Model.modes[s.mode])
         }
         mixT = min(1, mixT + dt / 1.5)
-
-        if s.autoCycle {
-            cycleClock += dt
-            let due = cycleClock > Float(s.cycleSeconds)
-            if due && (!s.cycleOnBeat || a.didBeat || cycleClock > Float(s.cycleSeconds) + 5) {
-                cycleClock = 0
-                if s.randomizeOnCycle { model.randomize() } else { model.step(1) }
-            }
-        } else { cycleClock = 0 }
 
         let target = palettes[s.palette].abcd
         for i in 0..<4 { palette[i] += (target[i] - palette[i]) * min(1, dt * 1.5) }
@@ -171,6 +180,10 @@ final class Renderer: NSObject, MTKViewDelegate {
 
         frames += 1
         if frames % 6 == 0 { model.meters = [a.bass, a.mid, a.treble, a.beat] }
-        if now - fpsClock >= 1 { model.fps = Int(Double(frames) / (now - fpsClock)); frames = 0; fpsClock = now }
+        if now - fpsClock >= 1 {
+            model.fps = Int(Double(frames) / (now - fpsClock)); frames = 0; fpsClock = now
+            let source = model.track.map { "♪ \($0.title) — \($0.artist)\n\($0.genre ?? "Genre unknown") → " } ?? "From the sound → "
+            model.pilotStatus = source + vibe.name + (a.bpm > 0 ? " · \(Int(a.bpm)) BPM" : "")
+        }
     }
 }

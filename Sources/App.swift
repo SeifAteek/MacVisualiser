@@ -8,6 +8,8 @@ struct Settings: Codable, Equatable {
     var cycleSeconds: Double = 30
     var cycleOnBeat = true
     var randomizeOnCycle = false
+    var smartPilot = true
+    var readNowPlaying = true
     var gain: Float = 1
     var smoothing: Float = 0.6
     var beatSensitivity: Float = 0.5
@@ -34,17 +36,54 @@ final class Model: ObservableObject {
                         "Plasma", "Equalizer", "Orb", "Aurora", "Synthwave"]
 
     @Published var s: Settings {
-        didSet { if let d = try? JSONEncoder().encode(s) { UserDefaults.standard.set(d, forKey: "settings") } }
+        didSet {
+            if let d = try? JSONEncoder().encode(s) { UserDefaults.standard.set(d, forKey: "settings") }
+            if s.readNowPlaying != oldValue.readNowPlaying { s.readNowPlaying ? nowPlaying.start() : nowPlaying.stop() }
+        }
     }
     @Published var panel = true
     @Published var toast: String?
     @Published var fps = 0
     @Published var meters: [Float] = [0, 0, 0, 0]
     @Published var audioError: String?
+    @Published var track: NowPlaying.Track?
+    @Published var pilotStatus = ""
+    private let nowPlaying = NowPlaying()
+    private var newTrack = false
+    private var recentScenes: [Int] = []
     private var toastID = 0
 
     init() {
-        s = UserDefaults.standard.data(forKey: "settings").flatMap { try? JSONDecoder().decode(Settings.self, from: $0) } ?? Settings()
+        s = Self.loadSettings()
+        nowPlaying.onChange = { [weak self] t in self?.track = t; self?.newTrack = t != nil }
+        if s.readNowPlaying { nowPlaying.start() }
+    }
+
+    /// Saved values laid over the defaults, so settings added in a new version don't wipe the old ones.
+    private static func loadSettings() -> Settings {
+        guard let data = UserDefaults.standard.data(forKey: "settings"),
+              let saved = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let defaults = try? JSONSerialization.jsonObject(with: JSONEncoder().encode(Settings())) as? [String: Any],
+              let json = try? JSONSerialization.data(withJSONObject: defaults.merging(saved) { $1 })
+        else { return Settings() }
+        return (try? JSONDecoder().decode(Settings.self, from: json)) ?? Settings()
+    }
+
+    func takeNewTrack() -> Bool { defer { newTrack = false }; return newTrack }
+
+    /// Smart autopilot: a scene and look that suit the vibe, avoiding the last few scenes.
+    func applyVibe(_ p: Profile) {
+        var n = s
+        n.mode = p.scenes.filter { !recentScenes.contains($0) && $0 != s.mode }.randomElement() ?? p.scenes.randomElement()!
+        recentScenes = Array(([n.mode] + recentScenes).prefix(3))
+        n.palette = p.palettes.randomElement()!
+        n.trails = .random(in: p.trails)
+        n.fbZoom = .random(in: p.zoom)
+        n.fbRotate = .random(in: p.spin)
+        n.flash = p.flash
+        n.shake = p.shake
+        n.symmetry = p.symmetry.randomElement()!
+        s = n // one publish and one save
     }
 
     func step(_ d: Int) { s.mode = (s.mode + d + Self.modes.count) % Self.modes.count }
@@ -198,9 +237,20 @@ struct ControlPanel: View {
                 }
                 section("Auto-pilot") {
                     Toggle("Cycle scenes", isOn: $model.s.autoCycle)
+                    Picker("Style", selection: $model.s.smartPilot) {
+                        Text("Smart").tag(true)
+                        Text("Shuffle").tag(false)
+                    }
+                    .pickerStyle(.segmented)
                     row("Every", "\(Int(model.s.cycleSeconds))s") { Slider(value: $model.s.cycleSeconds, in: 5...120) }
                     Toggle("Switch on the beat", isOn: $model.s.cycleOnBeat)
-                    Toggle("Randomize everything on switch", isOn: $model.s.randomizeOnCycle)
+                    if model.s.smartPilot {
+                        Toggle("Read song from Music & Spotify", isOn: $model.s.readNowPlaying)
+                            .help("Looks up the genre with Apple's iTunes Search when the player doesn't provide one.")
+                        Text(model.pilotStatus).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Toggle("Randomize everything on switch", isOn: $model.s.randomizeOnCycle)
+                    }
                 }
                 section("Audio") {
                     slider("Sensitivity", $model.s.gain, 0.2...3)

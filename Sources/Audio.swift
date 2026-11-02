@@ -111,6 +111,14 @@ final class Analyzer {
     var beatCount: Float = 0
     private(set) var didBeat = false
 
+    // Slow "vibe" features for the smart autopilot.
+    var bpm: Float = 0
+    var energy: Float = 0
+    var brightness: Float = 0.4
+    private(set) var didDrop = false
+    private var intervals: [Float] = []
+    private var shortE: Float = 0, longE: Float = 0, sinceLull: Float = 99
+
     private var peak: Float = 0.5
     private var wavePeak: Float = 0.1
     private var bassAvg: Float = 0
@@ -160,12 +168,28 @@ final class Analyzer {
         func avg(_ a: Int, _ b: Int, _ src: [Float]) -> Float { src[a..<b].reduce(0, +) / Float(b - a) }
         bass = avg(0, 65, spectrum); mid = avg(65, 171, spectrum); treble = avg(171, 256, spectrum)
         level = (bass + mid + treble) / 3
+        energy += (level - energy) * min(1, dt * 0.3)
+        var num: Float = 0, den: Float = 0
+        for i in 0..<Self.bands { num += Float(i) * spectrum[i]; den += spectrum[i] }
+        if den > 1 { brightness += (num / den / Float(Self.bands) - brightness) * min(1, dt * 0.5) }
+
+        // Drop: energy surges well above its long-run average shortly after a lull (the breakdown before it).
+        shortE += (level - shortE) * min(1, dt * 2)
+        longE += (level - longE) * min(1, dt * 0.12)
+        if shortE < longE * 0.75 { sinceLull = 0 } else { sinceLull += dt }
+        didDrop = shortE > longE * 1.3 && shortE > 0.25 && sinceLull < 8
+        if didDrop { sinceLull = 99 }
 
         // Beat: raw bass energy jumps above its running average.
         let rawBass = avg(0, 50, raw) / peak * gain
         sinceBeat += dt
         didBeat = rawBass > bassAvg * (1.6 - 0.8 * beatSensitivity) && rawBass > 0.25 && sinceBeat > 0.25
-        if didBeat { beat = 1; beatCount += 1; sinceBeat = 0 }
+        if didBeat {
+            if sinceBeat < 2 { intervals = Array((intervals + [sinceBeat]).suffix(16)) }
+            beat = 1; beatCount += 1; sinceBeat = 0
+        }
+        if sinceBeat > 4 { intervals.removeAll() } // music stopped: forget the tempo
+        bpm = Vibe.bpm(intervals)
         bassAvg += (rawBass - bassAvg) * min(1, dt * 3)
         beat *= exp(-dt * 6)
 
