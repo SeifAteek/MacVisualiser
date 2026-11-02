@@ -70,6 +70,14 @@ float3 hueRotate(float3 c, float a) {
     return c * ca + cross(k, c) * sin(a) + k * dot(k, c) * (1 - ca);
 }
 
+// Tent-filtered mip sample. A single bilinear tap of a tiny mip (13×23 px on a 4K screen) shows as blocks when stretched.
+float3 bloomTap(texture2d<float> img, sampler s, float2 c, float lod) {
+    float2 t = exp2(lod) / float2(img.get_width(), img.get_height());
+    return (img.sample(s, c, level(lod)).rgb * 4
+            + img.sample(s, c + float2(t.x, t.y), level(lod)).rgb + img.sample(s, c + float2(-t.x, t.y), level(lod)).rgb
+            + img.sample(s, c + float2(t.x, -t.y), level(lod)).rgb + img.sample(s, c + float2(-t.x, -t.y), level(lod)).rgb) / 8;
+}
+
 float3 stars(float2 p, float density, float bright) {
     float2 g = p * density;
     float h = hash21(floor(g));
@@ -99,8 +107,11 @@ float3 sTunnel(float2 p, ARGS) {
     float ang = a / TAU + 0.5;
     float s = SPEC(abs(fract(ang * 2) * 2 - 1));
     float2 g = float2(ang * 24, z * 2);
-    float2 gf = abs(fract(g) - 0.5);
-    float grid = smoothstep(0.42, 0.5, max(gf.x, gf.y));
+    // Grid lines anti-aliased to one screen pixel at any resolution. Derivatives are analytic: fwidth(ang) jumps at the atan seam.
+    float px = 2 / u.height;
+    float2 fw = float2(24 * px / (max(r, 0.001) * TAU), 0.7 * px / max(r * r, 1e-6));
+    float2 l = smoothstep(0.46 - fw, 0.46 + fw, abs(fract(g) - 0.5));
+    float grid = mix(max(l.x, l.y), 0.15, saturate(max(fw.x, fw.y) * 4 - 0.4)); // sub-pixel cells near the centre: average out
     float3 col = PAL(z * 0.04 + ang) * grid * (0.3 + u.bass * 2.0);
     col += PAL(ang * 2 + 0.25) * s * s * 2.0 * (1 - grid) * (0.6 + 0.4 * sin(z * 3.0));
     col *= smoothstep(0.0, 0.6, r);
@@ -336,7 +347,9 @@ fragment float4 fsScene(VOut in [[stage_in]], constant U& u [[buffer(0)]], const
 }
 
 // Kaleidoscope fold of the scene + Milkdrop-style feedback (zoom / rotate / hue-drift of last frame).
-fragment float4 fsFeedback(VOut in [[stage_in]], constant U& u [[buffer(0)]],
+struct FeedbackOut { float4 color [[color(0)]]; float4 glow [[color(1)]]; };
+
+fragment FeedbackOut fsFeedback(VOut in [[stage_in]], constant U& u [[buffer(0)]],
                            texture2d<float> scn [[texture(0)]], texture2d<float> prev [[texture(1)]]) {
     constexpr sampler s(filter::linear, address::mirrored_repeat);
     float2 asp = float2(u.width / u.height, 1);
@@ -350,15 +363,20 @@ fragment float4 fsFeedback(VOut in [[stage_in]], constant U& u [[buffer(0)]],
     float3 col = scn.sample(s, tc(p / asp + 0.5)).rgb;
     if (u.trails > 0) {
         float2 q = rot(u.fbRotate * 0.03) * ((in.uv - 0.5) * asp);
-        q /= 1 + u.fbZoom * 0.04 * (1 + u.bass);
-        float3 pc = hueRotate(prev.sample(s, tc(q / asp + 0.5)).rgb, u.fbHue * 0.1);
+        // Average along this frame's zoom step, so trails smear smoothly instead of stacking visible copies on big screens.
+        float k = u.fbZoom * 0.04 * (1 + u.bass);
+        float3 pc = 0;
+        for (int i = 1; i <= 3; i++) pc += prev.sample(s, tc(q / (1 + k * i / 3.0) / asp + 0.5)).rgb;
+        pc = hueRotate(pc / 3, u.fbHue * 0.1);
         col = max(col, pc * u.trails);
     }
-    return float4(col, 1);
+    // Bloom source: only the highlights (soft knee), so the glow never blurs the rest of the picture.
+    float m = max(col.r, max(col.g, col.b));
+    return { float4(col, 1), float4(col * saturate((m - 0.9) / 0.9), 1) };
 }
 
 fragment float4 fsPost(VOut in [[stage_in]], constant U& u [[buffer(0)]], constant float4* pl [[buffer(3)]],
-                       texture2d<float> img [[texture(0)]]) {
+                       texture2d<float> img [[texture(0)]], texture2d<float> glow [[texture(1)]]) {
     constexpr sampler s(filter::linear, mip_filter::linear, address::clamp_to_edge);
     float2 uv = in.uv + (float2(hash21(float2(u.rtime, 1)), hash21(float2(u.rtime, 2))) - 0.5) * u.beat * u.shake * 0.03;
     float2 d = uv - 0.5;
@@ -367,8 +385,9 @@ fragment float4 fsPost(VOut in [[stage_in]], constant U& u [[buffer(0)]], consta
                         img.sample(s, tc(uv), level(0)).g,
                         img.sample(s, tc(uv - d * ca), level(0)).b);
     // Wide, cheap bloom from the mip chain.
-    float3 b = img.sample(s, tc(uv), level(3)).rgb * 0.5 + img.sample(s, tc(uv), level(5)).rgb * 0.8 + img.sample(s, tc(uv), level(7)).rgb;
-    col += max(b - 0.15, 0.0) * u.bloom * 0.5;
+    // Wide layers only: a tight layer hugs every edge and reads as blur on big screens.
+    float3 b = bloomTap(glow, s, tc(uv), 4) * 0.6 + bloomTap(glow, s, tc(uv), 6) * 0.8 + bloomTap(glow, s, tc(uv), 7);
+    col += b * u.bloom * 0.5;
     col = hueRotate(col, u.hue);
     col += (PAL(u.beatCount * 0.37) + 0.4) * u.beat * u.flash * 0.25;
     col = (col * (2.51 * col + 0.03)) / (col * (2.43 * col + 0.59) + 0.14); // ACES fit

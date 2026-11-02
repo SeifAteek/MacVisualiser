@@ -35,6 +35,7 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     private var sceneTex: MTLTexture?
     private var accum: [MTLTexture] = []
+    private var glowTex: MTLTexture?
     private var flip = 0
     private var freshAccum = true
 
@@ -54,15 +55,15 @@ final class Renderer: NSObject, MTKViewDelegate {
         let src = try! String(contentsOf: Bundle.main.url(forResource: "Shaders", withExtension: "metal")!, encoding: .utf8)
         let lib: MTLLibrary
         do { lib = try device.makeLibrary(source: src, options: nil) } catch { fatalError("Shader compile failed: \(error)") }
-        func pso(_ frag: String, _ fmt: MTLPixelFormat) -> MTLRenderPipelineState {
+        func pso(_ frag: String, _ fmts: MTLPixelFormat...) -> MTLRenderPipelineState {
             let d = MTLRenderPipelineDescriptor()
             d.vertexFunction = lib.makeFunction(name: "vsQuad")
             d.fragmentFunction = lib.makeFunction(name: frag)
-            d.colorAttachments[0].pixelFormat = fmt
+            for (i, f) in fmts.enumerated() { d.colorAttachments[i].pixelFormat = f }
             return try! device.makeRenderPipelineState(descriptor: d)
         }
         scenePSO = pso("fsScene", .rgba16Float)
-        feedbackPSO = pso("fsFeedback", .rgba16Float)
+        feedbackPSO = pso("fsFeedback", .rgba16Float, .rgba16Float) // image + highlights for bloom
         postPSO = pso("fsPost", view.colorPixelFormat)
         palette = palettes[model.s.palette].abcd
         super.init()
@@ -76,18 +77,21 @@ final class Renderer: NSObject, MTKViewDelegate {
         d.usage = [.renderTarget, .shaderRead]
         d.storageMode = .private
         sceneTex = device.makeTexture(descriptor: d)
+        accum = [device.makeTexture(descriptor: d)!, device.makeTexture(descriptor: d)!]
         let m = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: w, height: h, mipmapped: true)
         m.usage = [.renderTarget, .shaderRead]
         m.storageMode = .private
-        accum = [device.makeTexture(descriptor: m)!, device.makeTexture(descriptor: m)!]
+        glowTex = device.makeTexture(descriptor: m)
         freshAccum = true
     }
 
-    private func pass(_ cb: MTLCommandBuffer, _ target: MTLTexture, _ pso: MTLRenderPipelineState, _ bind: (MTLRenderCommandEncoder) -> Void) {
+    private func pass(_ cb: MTLCommandBuffer, _ targets: MTLTexture..., pso: MTLRenderPipelineState, _ bind: (MTLRenderCommandEncoder) -> Void) {
         let rpd = MTLRenderPassDescriptor()
-        rpd.colorAttachments[0].texture = target
-        rpd.colorAttachments[0].loadAction = .dontCare
-        rpd.colorAttachments[0].storeAction = .store
+        for (i, t) in targets.enumerated() {
+            rpd.colorAttachments[i].texture = t
+            rpd.colorAttachments[i].loadAction = .dontCare
+            rpd.colorAttachments[i].storeAction = .store
+        }
         let enc = cb.makeRenderCommandEncoder(descriptor: rpd)!
         enc.setRenderPipelineState(pso)
         bind(enc)
@@ -138,7 +142,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         if sceneTex?.width != w || sceneTex?.height != h { makeTextures(w, h, view.device!) }
 
         guard let drawable = view.currentDrawable, let rpd = view.currentRenderPassDescriptor,
-              let cb = queue.makeCommandBuffer(), let sceneTex else { return }
+              let cb = queue.makeCommandBuffer(), let sceneTex, let glowTex else { return }
 
         var u = Uniforms(width: Float(w), height: Float(h), time: time, rtime: rtime,
                          bass: a.bass, mid: a.mid, treble: a.treble, level: a.level,
@@ -151,7 +155,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         let ulen = MemoryLayout<Uniforms>.stride
         let plen = MemoryLayout<SIMD4<Float>>.stride * 4
 
-        pass(cb, sceneTex, scenePSO) { e in
+        pass(cb, sceneTex, pso: scenePSO) { e in
             e.setFragmentBytes(&u, length: ulen, index: 0)
             e.setFragmentBytes(a.spectrum, length: Analyzer.bands * 4, index: 1)
             e.setFragmentBytes(a.wave, length: Analyzer.bands * 4, index: 2)
@@ -159,13 +163,13 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         let src = accum[flip], dst = accum[1 - flip]
         flip ^= 1
-        pass(cb, dst, feedbackPSO) { e in
+        pass(cb, dst, glowTex, pso: feedbackPSO) { e in
             e.setFragmentBytes(&u, length: ulen, index: 0)
             e.setFragmentTexture(sceneTex, index: 0)
             e.setFragmentTexture(src, index: 1)
         }
         let blit = cb.makeBlitCommandEncoder()!
-        blit.generateMipmaps(for: dst)
+        blit.generateMipmaps(for: glowTex)
         blit.endEncoding()
 
         let enc = cb.makeRenderCommandEncoder(descriptor: rpd)!
@@ -173,6 +177,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         enc.setFragmentBytes(&u, length: ulen, index: 0)
         enc.setFragmentBytes(palette, length: plen, index: 3)
         enc.setFragmentTexture(dst, index: 0)
+        enc.setFragmentTexture(glowTex, index: 1)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         enc.endEncoding()
         cb.present(drawable)
