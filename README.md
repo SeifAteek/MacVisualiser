@@ -8,7 +8,7 @@ A real-time music visualizer for macOS that reacts to **whatever your Mac is pla
 
 ## Download
 
-Grab `Visualizer-1.3-macOS.zip` from [**Releases**](https://github.com/SeifAteek/MacVisualiser/releases/latest), unzip it, and move `Visualizer.app` to Applications.
+Grab `Visualizer-1.3.1-macOS.zip` from [**Releases**](https://github.com/SeifAteek/MacVisualiser/releases/latest), unzip it, and move `Visualizer.app` to Applications.
 
 The app isn't notarized, so macOS blocks it the first time. **Right-click → Open** once, or run:
 
@@ -102,7 +102,11 @@ cd MacVisualiser
 open build/Visualizer.app
 ```
 
-Rebuilding changes the app's signature, so macOS may ask for the audio permission again.
+By default the build is ad-hoc signed, so macOS may ask for permissions again after every rebuild. To sign with your own certificate (permissions then stick), pass its name or hash, as listed by `security find-identity -v -p codesigning`:
+
+```bash
+SIGN_ID="Apple Development: you@example.com (XXXXXXXXXX)" ./build.sh
+```
 
 ## How it works
 

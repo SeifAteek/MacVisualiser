@@ -10,5 +10,6 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 swiftc -O -swift-version 5 -parse-as-library Sources/*.swift -o "$APP/Contents/MacOS/Visualizer"
 cp Sources/Shaders.metal "$APP/Contents/Resources/" # compiled at launch by Metal, no metal toolchain needed
 cp Info.plist "$APP/Contents/"
-codesign --force --sign - "$APP"
+# SIGN_ID="Apple Development: …" (or a Developer ID) gives a stable identity, so macOS keeps permissions across updates; default is ad-hoc.
+codesign --force --sign "${SIGN_ID:--}" "$APP"
 echo "Built $APP — open it with: open $APP"
